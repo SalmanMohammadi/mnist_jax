@@ -24,15 +24,15 @@ def get_datasets():
 (train_inputs, train_labels), (test_inputs, test_labels) = get_datasets()
 
 # setup some hyperparameters
-batch_size = 512
+batch_size = 128
 num_epochs = 100
 input_shape = 28 * 28
 hidden_dim = 128
-num_layers = 1
+num_layers = 2
 num_heads = 2
 head_dim = 128
 num_classes = 10
-lr = 1e-3
+lr = 2e-3
 beta = 0.9
 
 ### define the model
@@ -95,8 +95,6 @@ def evaluate():
         pred = jnp.argmax(logits, axis=-1)
         correct_predictions += jnp.sum(pred == y)
 
-    print(f"Accuracy: {(100 * correct_predictions / len(test_inputs)):.2f}%")
-
 # simple cross entropy loss
 def calculate_loss(x, y, model):
     logits = forward(x, model)
@@ -108,6 +106,7 @@ def calculate_loss(x, y, model):
 #grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
 grad_fn = jax.value_and_grad(calculate_loss, argnums=2)
 num_steps = len(train_inputs) // batch_size
+losses = []
 for epoch in range(num_epochs):
     epoch_loss = 0
     d0 = time.perf_counter()
@@ -123,4 +122,4 @@ for epoch in range(num_epochs):
         epoch_loss += loss
     dt = time.perf_counter() - d0
     print(f"Epoch: {epoch} | loss: {epoch_loss / num_steps:.3f} | dt: {dt:.2f}s")
-    evaluate()
+evaluate()

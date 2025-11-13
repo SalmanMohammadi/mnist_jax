@@ -103,8 +103,8 @@ def calculate_loss(x, y, model):
     loss = -jnp.mean(jnp.sum(logp * y_onehot, axis=-1))
     return loss
 
-#grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
-grad_fn = jax.value_and_grad(calculate_loss, argnums=2)
+grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
+#grad_fn = jax.value_and_grad(calculate_loss, argnums=2)
 num_steps = len(train_inputs) // batch_size
 losses = []
 for epoch in range(num_epochs):

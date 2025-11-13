@@ -33,7 +33,7 @@ hidden_dim = input_shape // 16
 num_layers = 2
 num_classes = 10
 lr = 5e-3
-beta = 0.99
+beta = 0.95
 
 ### define the model
 # first we need to use a different random key for each weight init call

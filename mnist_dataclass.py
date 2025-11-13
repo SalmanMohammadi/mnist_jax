@@ -1,9 +1,10 @@
 import pyarrow.parquet as pq
-from dataclaases import dataclass
+from dataclasses import dataclass
 from PIL import Image
 import io
 import jax
 import jax.numpy as jnp
+from jax import Array
 import numpy as np
 import time
 rng = jax.random.key(42)
@@ -39,30 +40,40 @@ beta = 0.99
 rng, key = jax.random.split(rng)
 init_weight = lambda in_dim, out_dim, key: jax.random.normal(key, (in_dim, out_dim), dtype=jnp.float32) * np.sqrt(1 / in_dim)
 
+@jax.tree_util.register_dataclass
+@dataclass
 class Model:
-    w_0: jax.Array
-    
-model = {
-    "w_0": init_weight(input_shape, hidden_dim, key)
-}
-for i in range(1, num_layers):
-    rng, key = jax.random.split(rng)
-    model[f"w_{i}"] = init_weight(hidden_dim, hidden_dim, key)
-rng, key = jax.random.split(rng)
-model["w_out"] = init_weight(hidden_dim, num_classes, key)
+    w_0: Array
+    layers: list[Array]
+    w_out: Array
+
+    def forward(self, x):
+        x = jax.nn.relu(jnp.dot(x, self.w_0))
+        for layer in self.layers:
+            x = jax.nn.relu(jnp.dot(x, layer))
+        logits = jnp.dot(x, self.w_out)
+        return logits
+
+def init_model(input_shape, hidden_dim, num_layers, rng, key):
+    w_0 =  init_weight(input_shape, hidden_dim, key)
+    layers = []
+    for i in range(num_layers):
+        rng, key = jax.random.split(rng)
+        layers.append(init_weight(hidden_dim, hidden_dim, key))
+    w_out = init_weight(hidden_dim, num_classes, key)
+    return Model(
+        w_0=w_0,
+        layers=layers,
+        w_out=w_out
+    )
+
+model = init_model(input_shape, hidden_dim, num_layers, rng, key)
 # also initialise velocity params for SGD with momentum
 velocity = jax.tree.map(lambda p: jnp.zeros_like(p), model)
 
-def forward(x, model):
-    x = jax.nn.relu(jnp.dot(x, model["w_0"]))
-    for i in range(1, num_layers):
-        x = jax.nn.relu(jnp.dot(x, model[f"w_{i}"]))
-    logits = jnp.dot(x, model["w_out"])
-    return logits
-
 # simple cross entropy loss
 def calculate_loss(x, y, model):
-    logits = forward(x, model)
+    logits = model.forward(x)
     logp = jax.nn.log_softmax(logits, axis=-1)
     y_onehot = jax.nn.one_hot(y, num_classes)
     loss = -jnp.mean(jnp.sum(logp * y_onehot, axis=-1))
@@ -93,7 +104,7 @@ for i in range(num_eval_steps):
     x = test_inputs[idxs]
     y = test_labels[idxs]
     
-    logits = forward(x, model)
+    logits = model.forward(x)
     pred = jnp.argmax(logits, axis=-1)
     correct_predictions += jnp.sum(pred == y)
 

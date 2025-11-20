@@ -32,16 +32,15 @@ test_labels = jnp.array(test_labels)
 
 # setup some hyperparameters
 batch_size = 256
-num_epochs = 15
+num_epochs = 5
 input_shape = 28 * 28
 hidden_dim = input_shape // 2
 num_layers = 1
 num_classes = 10
 lr = 2e-3
-beta_1 = 0.9
-beta_2 = 0.999
-eps = 1e-8
+beta = 0.95
 lmbda = 0.001
+ns_steps = 2
 ### define the model
 # first we need to use a different random key for each weight init call
 rng, key = jax.random.split(rng)
@@ -75,11 +74,8 @@ def init_model(input_shape, hidden_dim, num_layers, rng, key):
         w_out=w_out
     )
 
-model = init_model(input_shape, hidden_dim, num_layers, rng, key)
-# first moment adamw params
-m_1 = jax.tree.map(lambda p: jnp.zeros_like(p), model)
-# second moment
-m_2 = jax.tree.map(lambda p: jnp.zeros_like(p), model)
+model = init_model(input_shape, hidden_dim, num_layers, rng, key)# muon momentum
+mu = jax.tree.map(lambda p: jnp.zeros_like(p), model)
 
 # simple cross entropy loss
 def calculate_loss(x, y, model):
@@ -92,16 +88,36 @@ def calculate_loss(x, y, model):
 grad_fn = jax.value_and_grad(calculate_loss, argnums=2)
 
 @jax.jit
-def train_step(model, m_1, m_2, x, y, step):
+def train_step(model, mu, x, y, step):
     loss, grads = grad_fn(x, y, model)
-    # adam update
-    m_1 = jax.tree.map(lambda m, grad: m * beta_1 + (1 - beta_1) * grad, m_1, grads)
-    m_2 = jax.tree.map(lambda v, grad: v * beta_2 + (1 - beta_2) * jnp.square(grad), m_2, grads)
-    # bias updates
-    m_1_ = jax.tree.map(lambda m: m / (1 - (beta_1 ** step)), m_1)
-    m_2_ = jax.tree.map(lambda v: v / (1 - (beta_2 ** step)), m_2)
-    model = jax.tree.map(lambda p, m, v: p - (lr * m / (jnp.sqrt(v) + eps)) - (lr * lmbda * p), model, m_1_, m_2_)
-    return model, m_1, m_2, loss
+    ### muon update
+    # original momentum update
+    mu = jax.tree.map(lambda m, grad: m * beta + (1 - beta) * grad, mu, grads)
+    # nesterov update
+    update = jax.tree.map(lambda m, grad: grad * (1 - beta) + beta * m, mu, grads)
+    # newton-shulz iteration
+    def newton_shulz(G, ns_steps):
+        a, b, c = (3.4445, -4.7750,  2.0315)
+        transposed = G.shape[-2] > G.shape[-1]
+        G = G.astype(jnp.bfloat16)
+        if transposed:
+            G = G.T
+        G = G / (jnp.linalg.norm(G, keepdims=True) + 1e-7)
+
+        def ns_iter(i, X):
+            A = X @ X.mT
+            B = b * A + c * (A @ A)
+            return a * X + B @ X
+
+        G = jax.lax.fori_loop(0, ns_steps, ns_iter, G, unroll=True)
+        if transposed:
+            G = G.T
+        G = G.astype(jnp.float32)
+        return G
+
+    update = jax.tree.map(lambda u, g: newton_shulz(u, ns_steps) * (max(1, g.shape[-2] / g.shape[-1]))**0.5, update, grads)
+    model = jax.tree.map(lambda p, u: p * (1 - lr * lmbda) - u * lr, model, update)
+    return model, mu, loss
 
 num_steps = len(train_inputs) // batch_size
 step = 1
@@ -112,7 +128,7 @@ for epoch in range(num_epochs):
     for i in range(num_steps):
         x = train_inputs[i * batch_size : (i+1) * batch_size]
         y = train_labels[i * batch_size : (i+1) * batch_size]
-        model, m_1, m_2, loss = train_step(model, m_1, m_2, x, y, step)
+        model, mu, loss = train_step(model, mu, x, y, step)
         epoch_loss += loss
         step += 1
     dt = time.perf_counter() - d0

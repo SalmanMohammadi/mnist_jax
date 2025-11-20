@@ -66,6 +66,7 @@ def calculate_loss(x, y, model):
 grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
 
 num_steps = len(train_inputs) // batch_size
+train_start = time.perf_counter()
 for epoch in range(num_epochs):
     epoch_loss = 0
     d0 = time.perf_counter()
@@ -79,6 +80,9 @@ for epoch in range(num_epochs):
         epoch_loss += loss
     dt = time.perf_counter() - d0
     print(f"Epoch: {epoch} | loss: {epoch_loss / num_steps:.3f} | dt: {dt:.2f}s")
+
+total_train_time = time.perf_counter() - train_start
+print(f"total train time: {total_train_time:.2f}s")
 
 # evaluate the model
 correct_predictions = 0

@@ -1,12 +1,11 @@
 import pyarrow.parquet as pq
-import os
 from dataclasses import dataclass
 from PIL import Image
 import io
 import jax
 import jax.numpy as jnp
 from jax import Array
-from jax.sharding import Mesh, AxisType,NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 import numpy as np
 import time
 rng = jax.random.key(42)
@@ -116,6 +115,7 @@ def calculate_loss(x, y, model):
     loss = -jnp.mean(jnp.sum(logp * y_onehot, axis=-1))
     return loss
 
+# do I need to jit this here? I don't think so
 grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
 
 @jax.jit
@@ -124,8 +124,6 @@ def train_step(model, m_1, m_2, x, y, step):
     loss, grads = grad_fn(x, y, model)
     grads = jax.lax.pmean(grads, "b")
     loss = jax.lax.pmean(loss, "b")
-    # print(f"loss: {loss}")
-    # exit()
     # adam update
     m_1 = jax.tree.map(lambda m, grad: m * beta_1 + (1 - beta_1) * grad, m_1, grads)
     m_2 = jax.tree.map(lambda v, grad: v * beta_2 + (1 - beta_2) * jnp.square(grad), m_2, grads)

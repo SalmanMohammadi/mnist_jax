@@ -5,6 +5,7 @@ import io
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jax.sharding import NamedSharding, PartitionSpec as P
 import numpy as np
 import time
 rng = jax.random.key(42)
@@ -34,14 +35,15 @@ test_labels = jnp.array(test_labels)
 batch_size = 256
 num_epochs = 15
 input_shape = 28 * 28
-hidden_dim = input_shape // 2
-num_layers = 1
+hidden_dim = input_shape // 16
+num_layers = 5
 num_classes = 10
 lr = 2e-3
 beta_1 = 0.9
 beta_2 = 0.999
 eps = 1e-8
 lmbda = 0.001
+
 ### define the model
 # first we need to use a different random key for each weight init call
 rng, key = jax.random.split(rng)
@@ -57,7 +59,7 @@ class Model:
     def forward(self, x):
         x = jax.nn.relu(jnp.dot(x, self.w_0))
         for layer in self.layers:
-            x = jax.nn.relu(jnp.dot(x, layer))
+            x = x + jax.nn.relu(jnp.dot(x, layer))
         logits = jnp.dot(x, self.w_out)
         return logits
 
@@ -76,12 +78,19 @@ def init_model(input_shape, hidden_dim, num_layers, rng, key):
     )
 
 model = init_model(input_shape, hidden_dim, num_layers, rng, key)
-import pdb
-pdb.set_trace()
 # first moment adamw params
 m_1 = jax.tree.map(lambda p: jnp.zeros_like(p), model)
 # second moment
 m_2 = jax.tree.map(lambda p: jnp.zeros_like(p), model)
+
+### distributed_setup
+world_size = jax.device_count()
+mesh = jax.make_mesh((world_size,), ("b",))
+jax.set_mesh(mesh)
+# replicate model and optimizer parameters
+model = jax.device_put(model, device=NamedSharding(mesh, P()))
+m_1 = jax.device_put(m_1, device=NamedSharding(mesh, P()))
+m_2 = jax.device_put(m_2, device=NamedSharding(mesh, P()))
 
 # simple cross entropy loss
 def calculate_loss(x, y, model):
@@ -91,27 +100,14 @@ def calculate_loss(x, y, model):
     loss = -jnp.mean(jnp.sum(logp * y_onehot, axis=-1))
     return loss
 
-grad_fn = jax.value_and_grad(calculate_loss, argnums=2)
-grad_accm_steps = 1
+# do I need to jit this here? I don't think so
+grad_fn = jax.jit(jax.value_and_grad(calculate_loss, argnums=2))
+
 @jax.jit
 def train_step(model, m_1, m_2, x, y, step):
-    bs = batch_size // grad_accm_steps
-    
-    def inner_step(carry, j):
-        loss_accm, grad_accm = carry
-        x_ = jax.lax.dynamic_slice_in_dim(x, j * bs, bs, axis=0)
-        y_ = jax.lax.dynamic_slice_in_dim(y, j * bs, bs, axis=0)
-
-        loss, grads = grad_fn(x_, y_, model)
-        grad_accm = jax.tree.map(jnp.add, grad_accm, grads)
-        loss_accm += loss
-        return (loss_accm, grad_accm), None
-        
-    grad_accm = jax.tree.map(jnp.zeros_like, model)
-    (loss, grads), _ = jax.lax.scan(inner_step, (0.0, grad_accm), jnp.arange(grad_accm_steps))
-    grads = jax.tree.map(lambda g: g / grad_accm_steps, grads)
-    loss /= grad_accm_steps
-    
+    loss, grads = grad_fn(x, y, model)
+    grads = jax.lax.pmean(grads, "b")
+    loss = jax.lax.pmean(loss, "b")
     # adam update
     m_1 = jax.tree.map(lambda m, grad: m * beta_1 + (1 - beta_1) * grad, m_1, grads)
     m_2 = jax.tree.map(lambda v, grad: v * beta_2 + (1 - beta_2) * jnp.square(grad), m_2, grads)
@@ -130,14 +126,19 @@ for epoch in range(num_epochs):
     for i in range(num_steps):
         x = train_inputs[i * batch_size : (i+1) * batch_size]
         y = train_labels[i * batch_size : (i+1) * batch_size]
+
+        x = jax.device_put(x, NamedSharding(mesh, P("b", None)))
+        y = jax.device_put(y, NamedSharding(mesh, P("b")))
         model, m_1, m_2, loss = train_step(model, m_1, m_2, x, y, step)
         epoch_loss += loss
         step += 1
     dt = time.perf_counter() - d0
     print(f"Epoch: {epoch} | loss: {epoch_loss / num_steps:.3f} | dt: {dt:.2f}s")
 
+final_loss = epoch_loss / num_steps
+print(f"Final loss {final_loss:.5f}, expected: 0.06100")
 total_train_time = time.perf_counter() - train_start
-print(f"total train time: {total_train_time:.2f}s")
+print(f"total train time: {total_train_time:.2f}s baseline single device: ~3.3s")
 
 # evaluate the model
 correct_predictions = 0
